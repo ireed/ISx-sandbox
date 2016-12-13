@@ -70,17 +70,26 @@ long long int my_bucket_size = 0;
 // The receive array for the All2All exchange
 KEY_TYPE my_bucket_keys[KEY_BUFFER_SIZE];
 
-#ifdef PERMUTE
-int * permute_array;
-#endif
 
 int main(const int argc,  char ** argv)
 {
   shmem_init();
 
+  #ifdef PERMUTE
+  int * permute_array;
+  permute_array = (int *) malloc( shmem_n_pes() * sizeof(int) );
+  #endif
+
   init_shmem_sync_array(pSync); 
 
   char * log_file = parse_params(argc, argv);
+
+  my_keys = malloc(NUM_KEYS_PER_PE * sizeof(KEY_TYPE));
+  local_bucket_sizes = malloc(NUM_BUCKETS * sizeof(int));
+  send_offsets = malloc(NUM_BUCKETS * sizeof(int));
+  local_bucket_offsets = malloc(NUM_BUCKETS * sizeof(int));
+  my_local_bucketed_keys = malloc(NUM_KEYS_PER_PE * sizeof(KEY_TYPE));
+  my_local_key_counts = malloc(BUCKET_WIDTH * sizeof(int));
 
   int err = bucket_sort();
 
@@ -200,15 +209,14 @@ static int bucket_sort(void)
 
     timer_start(&timers[TIMER_TOTAL]);
 
-    KEY_TYPE * my_keys = make_input();
+    make_input(my_keys);
 
-    int * local_bucket_sizes = count_local_bucket_sizes(my_keys);
+    count_local_bucket_sizes(my_keys, local_bucket_sizes);
 
-    int * send_offsets;
-    int * local_bucket_offsets = compute_local_bucket_offsets(local_bucket_sizes,
-                                                                   &send_offsets);
+    compute_local_bucket_offsets(local_bucket_sizes,
+                                           &send_offsets, local_bucket_offsets);
 
-    KEY_TYPE * my_local_bucketed_keys =  bucketize_local_keys(my_keys, local_bucket_offsets);
+    bucketize_local_keys(my_keys, local_bucket_offsets, my_local_bucketed_keys);
 
     KEY_TYPE * my_bucket_keys = exchange_keys(send_offsets, 
                                               local_bucket_sizes,
@@ -216,7 +224,7 @@ static int bucket_sort(void)
 
     my_bucket_size = receive_offset;
 
-    int * my_local_key_counts = count_local_keys(my_bucket_keys);
+    count_local_keys(my_bucket_keys, my_local_key_counts);
 
     shmem_barrier_all();
 
@@ -230,15 +238,15 @@ static int bucket_sort(void)
     // Reset receive_offset used in exchange_keys
     receive_offset = 0;
 
-    free(my_local_bucketed_keys);
-    free(my_keys);
-    free(local_bucket_sizes);
-    free(local_bucket_offsets);
-    free(send_offsets);
-    free(my_local_key_counts);
-
     shmem_barrier_all();
   }
+
+  free(my_local_bucketed_keys);
+  free(my_keys);
+  free(local_bucket_sizes);
+  free(local_bucket_offsets);
+  free(send_offsets);
+  free(my_local_key_counts);
 
   return err;
 }
@@ -248,16 +256,14 @@ static int bucket_sort(void)
  * Generates uniformly random keys [0, MAX_KEY_VAL] on each rank using the time and rank
  * number as a seed
  */
-static KEY_TYPE * make_input(void)
+static void make_input(KEY_TYPE * restrict const keys)
 {
   timer_start(&timers[TIMER_INPUT]);
-
-  KEY_TYPE * restrict const my_keys = malloc(NUM_KEYS_PER_PE * sizeof(KEY_TYPE));
 
   pcg32_random_t rng = seed_my_rank();
 
   for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i) {
-    my_keys[i] = pcg32_boundedrand_r(&rng, MAX_KEY_VAL);
+    keys[i] = pcg32_boundedrand_r(&rng, MAX_KEY_VAL);
   }
 
   timer_stop(&timers[TIMER_INPUT]);
@@ -269,14 +275,13 @@ static KEY_TYPE * make_input(void)
   sprintf(msg,"Rank %d: Initial Keys: ", my_rank);
   for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i){
     if(i < PRINT_MAX)
-    sprintf(msg + strlen(msg),"%d ", my_keys[i]);
+    sprintf(msg + strlen(msg),"%d ", keys[i]);
   }
   sprintf(msg + strlen(msg),"\n");
   printf("%s",msg);
   fflush(stdout);
   my_turn_complete();
 #endif
-  return my_keys;
 }
 
 
@@ -284,17 +289,16 @@ static KEY_TYPE * make_input(void)
  * Computes the size of each bucket by iterating all keys and incrementing
  * their corresponding bucket's size
  */
-static inline int * count_local_bucket_sizes(KEY_TYPE const * restrict const my_keys)
+static inline void count_local_bucket_sizes(KEY_TYPE const * restrict const keys, int * restrict const bucket_sizes)
 {
-  int * restrict const local_bucket_sizes = malloc(NUM_BUCKETS * sizeof(int));
 
   timer_start(&timers[TIMER_BCOUNT]);
 
-  init_array(local_bucket_sizes, NUM_BUCKETS);
+  init_array(bucket_sizes, NUM_BUCKETS);
 
   for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i){
-    const uint32_t bucket_index = my_keys[i]/BUCKET_WIDTH;
-    local_bucket_sizes[bucket_index]++;
+    const uint32_t bucket_index = keys[i]/BUCKET_WIDTH;
+    bucket_sizes[bucket_index]++;
   }
 
   timer_stop(&timers[TIMER_BCOUNT]);
@@ -306,7 +310,7 @@ static inline int * count_local_bucket_sizes(KEY_TYPE const * restrict const my_
   sprintf(msg,"Rank %d: local bucket sizes: ", my_rank);
   for(uint64_t i = 0; i < NUM_BUCKETS; ++i){
     if(i < PRINT_MAX)
-    sprintf(msg + strlen(msg),"%d ", local_bucket_sizes[i]);
+    sprintf(msg + strlen(msg),"%d ", bucket_sizes[i]);
   }
   sprintf(msg + strlen(msg),"\n");
   printf("%s",msg);
@@ -314,7 +318,6 @@ static inline int * count_local_bucket_sizes(KEY_TYPE const * restrict const my_
   my_turn_complete();
 #endif
 
-  return local_bucket_sizes;
 }
 
 
@@ -324,22 +327,19 @@ static inline int * count_local_bucket_sizes(KEY_TYPE const * restrict const my_
  * Stores a copy of the bucket offsets for use in exchanging keys because the
  * original bucket_offsets array is modified in the bucketize function
  */
-static inline int * compute_local_bucket_offsets(int const * restrict const local_bucket_sizes,
-                                                 int ** restrict send_offsets)
+static inline void compute_local_bucket_offsets(int const * restrict const bucket_sizes,
+                                 int ** restrict offsets, int * bucket_offsets )
 {
-  int * restrict const local_bucket_offsets = malloc(NUM_BUCKETS * sizeof(int));
 
   timer_start(&timers[TIMER_BOFFSET]);
 
-  (*send_offsets) = malloc(NUM_BUCKETS * sizeof(int));
-
-  local_bucket_offsets[0] = 0;
-  (*send_offsets)[0] = 0;
+  bucket_offsets[0] = 0;
+  (*offsets)[0] = 0;
   int temp = 0;
   for(uint64_t i = 1; i < NUM_BUCKETS; i++){
-    temp = local_bucket_offsets[i-1] + local_bucket_sizes[i-1];
-    local_bucket_offsets[i] = temp; 
-    (*send_offsets)[i] = temp;
+    temp = bucket_offsets[i-1] + bucket_sizes[i-1];
+    bucket_offsets[i] = temp; 
+    (*offsets)[i] = temp;
   }
   timer_stop(&timers[TIMER_BOFFSET]);
 
@@ -350,35 +350,33 @@ static inline int * compute_local_bucket_offsets(int const * restrict const loca
   sprintf(msg,"Rank %d: local bucket offsets: ", my_rank);
   for(uint64_t i = 0; i < NUM_BUCKETS; ++i){
     if(i < PRINT_MAX)
-    sprintf(msg + strlen(msg),"%d ", local_bucket_offsets[i]);
+    sprintf(msg + strlen(msg),"%d ", bucket_offsets[i]);
   }
   sprintf(msg + strlen(msg),"\n");
   printf("%s",msg);
   fflush(stdout);
   my_turn_complete();
 #endif
-  return local_bucket_offsets;
 }
 
 /*
  * Places local keys into their corresponding local bucket.
  * The contents of each bucket are not sorted.
  */
-static inline KEY_TYPE * bucketize_local_keys(KEY_TYPE const * restrict const my_keys,
-                                              int * restrict const local_bucket_offsets)
+static inline void bucketize_local_keys(KEY_TYPE const * restrict const keys,
+                                              int * restrict const bucket_offsets, KEY_TYPE * local_bucketed_keys)
 {
-  KEY_TYPE * restrict const my_local_bucketed_keys = malloc(NUM_KEYS_PER_PE * sizeof(KEY_TYPE));
 
   timer_start(&timers[TIMER_BUCKETIZE]);
 
   for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i){
-    const KEY_TYPE key = my_keys[i];
+    const KEY_TYPE key = keys[i];
     const uint32_t bucket_index = key / BUCKET_WIDTH;
     uint32_t index;
-    assert(local_bucket_offsets[bucket_index] >= 0);
-    index = local_bucket_offsets[bucket_index]++;
+    assert(bucket_offsets[bucket_index] >= 0);
+    index = bucket_offsets[bucket_index]++;
     assert(index < NUM_KEYS_PER_PE);
-    my_local_bucketed_keys[index] = key;
+    local_bucketed_keys[index] = key;
   }
 
   timer_stop(&timers[TIMER_BUCKETIZE]);
@@ -390,21 +388,20 @@ static inline KEY_TYPE * bucketize_local_keys(KEY_TYPE const * restrict const my
   sprintf(msg,"Rank %d: local bucketed keys: ", my_rank);
   for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i){
     if(i < PRINT_MAX)
-    sprintf(msg + strlen(msg),"%d ", my_local_bucketed_keys[i]);
+    sprintf(msg + strlen(msg),"%d ", local_bucketed_keys[i]);
   }
   sprintf(msg + strlen(msg),"\n");
   printf("%s",msg);
   fflush(stdout);
   my_turn_complete();
 #endif
-  return my_local_bucketed_keys;
 }
 
 
 /*
  * Each PE sends the contents of its local buckets to the PE that owns that bucket.
  */
-static inline KEY_TYPE * exchange_keys(int const * restrict const send_offsets,
+static inline KEY_TYPE * exchange_keys(int const * restrict const offsets,
                                        int const * restrict const local_bucket_sizes,
                                        KEY_TYPE const * restrict const my_local_bucketed_keys)
 {
@@ -416,7 +413,7 @@ static inline KEY_TYPE * exchange_keys(int const * restrict const send_offsets,
   // Keys destined for local key buffer can be written with memcpy
   const long long int write_offset_into_self = shmem_longlong_fadd(&receive_offset, (long long int)local_bucket_sizes[my_rank], my_rank);
   memcpy(&my_bucket_keys[write_offset_into_self], 
-         &my_local_bucketed_keys[send_offsets[my_rank]], 
+         &my_local_bucketed_keys[offsets[my_rank]], 
          local_bucket_sizes[my_rank]*sizeof(KEY_TYPE));
 
 
@@ -433,7 +430,7 @@ static inline KEY_TYPE * exchange_keys(int const * restrict const send_offsets,
     // Local keys already written with memcpy
     if(target_pe == my_rank){ continue; }
 
-    const int read_offset_from_self = send_offsets[target_pe];
+    const int read_offset_from_self = offsets[target_pe];
     const int my_send_size = local_bucket_sizes[target_pe];
 
     const long long int write_offset_into_target = shmem_longlong_fadd(&receive_offset, (long long int)my_send_size, target_pe);
@@ -481,13 +478,12 @@ static inline KEY_TYPE * exchange_keys(int const * restrict const send_offsets,
  * Counts the occurence of each key in my bucket. 
  * Key indices into the count array are the key's value minus my bucket's 
  * minimum key value to allow indexing from 0.
- * my_bucket_keys: All keys in my bucket unsorted [my_rank * BUCKET_WIDTH, (my_rank+1)*BUCKET_WIDTH)
+ * bucket_keys: All keys in my bucket unsorted [my_rank * BUCKET_WIDTH, (my_rank+1)*BUCKET_WIDTH)
  */
-static inline int * count_local_keys(KEY_TYPE const * restrict const my_bucket_keys)
+static inline void count_local_keys(KEY_TYPE const * restrict const bucket_keys, int * restrict const  local_key_counts)
 {
-  int * restrict const my_local_key_counts = malloc(BUCKET_WIDTH * sizeof(int));
-  memset(my_local_key_counts, 0, BUCKET_WIDTH * sizeof(int));
 
+  memset(local_key_counts, 0, BUCKET_WIDTH * sizeof(int));
   timer_start(&timers[TIMER_SORT]);
 
   const int my_rank = shmem_my_pe();
@@ -495,12 +491,12 @@ static inline int * count_local_keys(KEY_TYPE const * restrict const my_bucket_k
 
   // Count the occurences of each key in my bucket
   for(long long int i = 0; i < my_bucket_size; ++i){
-    const unsigned int key_index = my_bucket_keys[i] - my_min_key;
+    const unsigned int key_index = bucket_keys[i] - my_min_key;
 
-    assert(my_bucket_keys[i] >= my_min_key);
+    assert(bucket_keys[i] >= my_min_key);
     assert(key_index < BUCKET_WIDTH);
 
-    my_local_key_counts[key_index]++;
+    local_key_counts[key_index]++;
   }
   timer_stop(&timers[TIMER_SORT]);
 
@@ -510,7 +506,7 @@ static inline int * count_local_keys(KEY_TYPE const * restrict const my_bucket_k
   sprintf(msg,"Rank %d: Bucket Size %lld | Local Key Counts:", my_rank, my_bucket_size);
   for(uint64_t i = 0; i < BUCKET_WIDTH; ++i){
     if(i < PRINT_MAX)
-    sprintf(msg + strlen(msg),"%d ", my_local_key_counts[i]);
+    sprintf(msg + strlen(msg),"%d ", local_key_counts[i]);
   }
   sprintf(msg + strlen(msg),"\n");
   printf("%s",msg);
@@ -518,7 +514,6 @@ static inline int * count_local_keys(KEY_TYPE const * restrict const my_bucket_k
   my_turn_complete();
 #endif
 
-  return my_local_key_counts;
 }
 
 /*
@@ -871,8 +866,6 @@ static void my_turn_complete()
  */
 static void create_permutation_array()
 {
-
-  permute_array = (int *) malloc( NUM_PES * sizeof(int) );
 
   for(uint64_t i = 0; i < NUM_PES; ++i){
     permute_array[i] = i;

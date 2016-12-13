@@ -36,6 +36,17 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <inttypes.h>
 #include "timer.h"
 #include "pcg_basic.h"
+
+/*
+ * Dynamically allocated variables.
+ */
+KEY_TYPE * restrict my_keys;
+int * restrict local_bucket_sizes;
+int * restrict local_bucket_offsets;
+KEY_TYPE * restrict my_local_bucketed_keys;
+int * restrict my_local_key_counts;
+int * send_offsets;
+
 /*
  * Ensures the command line parameters and values specified in params.h
  * are valid and will not cause problems.
@@ -65,40 +76,40 @@ static void shuffle(void * array, size_t n, size_t size);
 /*
  * Generates random keys [0, MAX_KEY_VAL] on each rank using the time and rank as a seed
  */
-static inline KEY_TYPE * make_input(void);
+static inline void make_input(KEY_TYPE * restrict const keys);
 
 /*
  * Computes the size of each local bucket by iterating all local keys and incrementing
  * their corresponding bucket's size
  */
-static inline int * count_local_bucket_sizes(KEY_TYPE const * restrict const my_keys);
+static inline void count_local_bucket_sizes(KEY_TYPE const * restrict const keys, int * restrict const bucket_sizes);
 
 /*
  * Computes the prefix scan of the local bucket sizes to determine the starting locations
  * of each bucket in the local bucketed array.
- * Stores a copy of the bucket offsets in send_offsets for use in exchanging keys because the
+ * Stores a copy of the bucket offsets in offsets for use in exchanging keys because the
  * original bucket_offsets array is modified in the bucketize function
  */
-static inline int * compute_local_bucket_offsets(int const * restrict const local_bucket_sizes,
-                                          int ** send_offsets);
+static inline void compute_local_bucket_offsets(int const * restrict const local_bucket_sizes,
+                                          int ** offsets, int * bucket_offsets);
 
 /*
  * Rearranges all local keys into their corresponding local bucket.
  * The contents of each bucket are not sorted.
  */
-static inline KEY_TYPE * bucketize_local_keys(KEY_TYPE const * restrict my_keys,
-                                       int * restrict const local_bucket_offsets);
+static inline void bucketize_local_keys(KEY_TYPE const * restrict keys,
+                                       int * restrict const bucket_offsets, KEY_TYPE * local_bucketed_keys);
 /*
  * Each PE sends the contents of its local buckets to the PE that owns that bucket.
  */
-static inline KEY_TYPE * exchange_keys(int const * restrict const send_offsets,
+static inline KEY_TYPE * exchange_keys(int const * restrict const offsets,
                                 int const * restrict const local_bucket_sizes,
                                 KEY_TYPE const * restrict const local_bucketed_keys);
 
 /*
  * Count the occurence of each key within my bucket. 
  */
-static inline int * count_local_keys(KEY_TYPE const * restrict const my_bucket_keys);
+static inline void count_local_keys(KEY_TYPE const * restrict const bucket_keys, int * restrict local_key_counts);
 
 /*
  * Verifies the correctness of the sort. 
