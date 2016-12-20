@@ -68,12 +68,13 @@ long long int my_bucket_size = 0;
 #define KEY_BUFFER_SIZE (1uLL<<28uLL)
 
 // The receive array for the All2All exchange
-KEY_TYPE my_bucket_keys[KEY_BUFFER_SIZE];
+KEY_TYPE *my_bucket_keys;
 
 
 int main(const int argc,  char ** argv)
 {
   shmem_init();
+  my_bucket_keys = shmem_malloc(KEY_BUFFER_SIZE * sizeof(KEY_TYPE));
 
   #ifdef PERMUTE
   int * permute_array;
@@ -440,9 +441,9 @@ static inline KEY_TYPE * exchange_keys(int const * restrict const offsets,
         my_rank, target_pe, write_offset_into_target, read_offset_from_self, my_send_size);
 #endif
 
-    shmem_int_put(&(my_bucket_keys[write_offset_into_target]), 
+    shmem_putmem(&(my_bucket_keys[write_offset_into_target]), 
                   &(my_local_bucketed_keys[read_offset_from_self]), 
-                  my_send_size, 
+                  my_send_size * sizeof(KEY_TYPE), 
                   target_pe);
 
     total_keys_sent += my_send_size;
@@ -462,7 +463,7 @@ static inline KEY_TYPE * exchange_keys(int const * restrict const offsets,
                         my_rank, receive_offset, total_keys_sent);
   for(long long int i = 0; i < receive_offset; ++i){
     if(i < PRINT_MAX)
-    sprintf(msg + strlen(msg),"%d ", my_bucket_keys[i]);
+    sprintf(msg + strlen(msg),"%ld ", (long int)my_bucket_keys[i]);
   }
   sprintf(msg + strlen(msg),"\n");
   printf("%s",msg);
@@ -487,7 +488,7 @@ static inline void count_local_keys(KEY_TYPE const * restrict const bucket_keys,
   timer_start(&timers[TIMER_SORT]);
 
   const int my_rank = shmem_my_pe();
-  const int my_min_key = my_rank * BUCKET_WIDTH;
+  const KEY_TYPE my_min_key = my_rank * BUCKET_WIDTH;
 
   // Count the occurences of each key in my bucket
   for(long long int i = 0; i < my_bucket_size; ++i){
@@ -531,12 +532,12 @@ static int verify_results(int const * restrict const my_local_key_counts,
 
   const int my_rank = shmem_my_pe();
 
-  const int my_min_key = my_rank * BUCKET_WIDTH;
-  const int my_max_key = (my_rank+1) * BUCKET_WIDTH - 1;
+  const KEY_TYPE my_min_key = my_rank * BUCKET_WIDTH;
+  const KEY_TYPE my_max_key = (my_rank+1) * BUCKET_WIDTH - 1;
 
   // Verify all keys are within bucket boundaries
   for(long long int i = 0; i < my_bucket_size; ++i){
-    const int key = my_local_keys[i];
+    const KEY_TYPE key = my_local_keys[i];
     if((key < my_min_key) || (key > my_max_key)){
       printf("Rank %d Failed Verification!\n",my_rank);
       printf("Key: %d is outside of bounds [%d, %d]\n", key, my_min_key, my_max_key);
@@ -850,7 +851,7 @@ static void wait_my_turn()
 
 static void my_turn_complete()
 {
-  const int my_rank = shmem_my_pe();
+  const uint32_t my_rank = shmem_my_pe();
   const int next_rank = my_rank+1;
 
   if(my_rank < (NUM_PES-1)){ // Last rank updates no one

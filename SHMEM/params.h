@@ -43,7 +43,11 @@ POSSIBILITY OF SUCH DAMAGE.
 
 // The data type used for the keys
 // If you change this, you will have to change the SHMEM API calls used
+#ifdef UINT32_KEYS
+typedef uint32_t KEY_TYPE;
+#else
 typedef int KEY_TYPE;
+#endif
 
 // STRONG SCALING: Total number of keys are fixed and the number of keys per PE are reduced with increasing number of PEs
 //  Invariants: Total number of keys, max key value
