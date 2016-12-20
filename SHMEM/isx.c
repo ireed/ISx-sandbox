@@ -81,6 +81,11 @@ int main(const int argc,  char ** argv)
   permute_array = (int *) malloc( shmem_n_pes() * sizeof(int) );
   #endif
 
+  #ifdef PERMUTE
+  int * permute_array;
+  permute_array = (int *) malloc( shmem_n_pes() * sizeof(int) );
+  #endif
+
   init_shmem_sync_array(pSync); 
 
   char * log_file = parse_params(argc, argv);
