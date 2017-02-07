@@ -68,13 +68,13 @@ long long int my_bucket_size = 0;
 #define KEY_BUFFER_SIZE (1uLL<<28uLL)
 
 // The receive array for the All2All exchange
-KEY_TYPE *my_bucket_keys;
+KEY_STRUCT *my_bucket_keys;
 
 
 int main(const int argc,  char ** argv)
 {
   shmem_init();
-  my_bucket_keys = shmem_malloc(KEY_BUFFER_SIZE * sizeof(KEY_TYPE));
+  my_bucket_keys = shmem_malloc(KEY_BUFFER_SIZE * sizeof(KEY_STRUCT));
 
   #ifdef PERMUTE
   int * permute_array;
@@ -90,11 +90,11 @@ int main(const int argc,  char ** argv)
 
   char * log_file = parse_params(argc, argv);
 
-  my_keys = malloc(NUM_KEYS_PER_PE * sizeof(KEY_TYPE));
+  my_keys = malloc(NUM_KEYS_PER_PE * sizeof(KEY_STRUCT));
   local_bucket_sizes = malloc(NUM_BUCKETS * sizeof(int));
   send_offsets = malloc(NUM_BUCKETS * sizeof(int));
   local_bucket_offsets = malloc(NUM_BUCKETS * sizeof(int));
-  my_local_bucketed_keys = malloc(NUM_KEYS_PER_PE * sizeof(KEY_TYPE));
+  my_local_bucketed_keys = malloc(NUM_KEYS_PER_PE * sizeof(KEY_STRUCT));
   my_local_key_counts = malloc(BUCKET_WIDTH * sizeof(int));
 
   int err = bucket_sort();
@@ -224,7 +224,7 @@ static int bucket_sort(void)
 
     bucketize_local_keys(my_keys, local_bucket_offsets, my_local_bucketed_keys);
 
-    KEY_TYPE * my_bucket_keys = exchange_keys(send_offsets, 
+    KEY_STRUCT * my_bucket_keys = exchange_keys(send_offsets, 
                                               local_bucket_sizes,
                                               my_local_bucketed_keys);
 
@@ -262,14 +262,14 @@ static int bucket_sort(void)
  * Generates uniformly random keys [0, MAX_KEY_VAL] on each rank using the time and rank
  * number as a seed
  */
-static void make_input(KEY_TYPE * restrict const keys)
+static void make_input(KEY_STRUCT * restrict const keys)
 {
   timer_start(&timers[TIMER_INPUT]);
 
   pcg32_random_t rng = seed_my_rank();
 
   for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i) {
-    keys[i] = pcg32_boundedrand_r(&rng, MAX_KEY_VAL);
+    keys[i] = PCG_BOUNDEDRAND_R(&rng, MAX_KEY_VAL);
   }
 
   timer_stop(&timers[TIMER_INPUT]);
@@ -281,7 +281,7 @@ static void make_input(KEY_TYPE * restrict const keys)
   sprintf(msg,"Rank %d: Initial Keys: ", my_rank);
   for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i){
     if(i < PRINT_MAX)
-    sprintf(msg + strlen(msg),"%d ", keys[i]);
+    sprintf(msg + strlen(msg),"%ld ", (long int) keys[i].word[0]);
   }
   sprintf(msg + strlen(msg),"\n");
   printf("%s",msg);
@@ -295,7 +295,7 @@ static void make_input(KEY_TYPE * restrict const keys)
  * Computes the size of each bucket by iterating all keys and incrementing
  * their corresponding bucket's size
  */
-static inline void count_local_bucket_sizes(KEY_TYPE const * restrict const keys, int * restrict const bucket_sizes)
+static inline void count_local_bucket_sizes(KEY_STRUCT const * restrict const keys, int * restrict const bucket_sizes)
 {
 
   timer_start(&timers[TIMER_BCOUNT]);
@@ -303,7 +303,7 @@ static inline void count_local_bucket_sizes(KEY_TYPE const * restrict const keys
   init_array(bucket_sizes, NUM_BUCKETS);
 
   for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i){
-    const uint32_t bucket_index = keys[i]/BUCKET_WIDTH;
+    const uint32_t bucket_index = keys[i].word[0]/BUCKET_WIDTH;
     bucket_sizes[bucket_index]++;
   }
 
@@ -369,15 +369,15 @@ static inline void compute_local_bucket_offsets(int const * restrict const bucke
  * Places local keys into their corresponding local bucket.
  * The contents of each bucket are not sorted.
  */
-static inline void bucketize_local_keys(KEY_TYPE const * restrict const keys,
-                                              int * restrict const bucket_offsets, KEY_TYPE * local_bucketed_keys)
+static inline void bucketize_local_keys(KEY_STRUCT const * restrict const keys,
+                                              int * restrict const bucket_offsets, KEY_STRUCT * local_bucketed_keys)
 {
 
   timer_start(&timers[TIMER_BUCKETIZE]);
 
   for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i){
-    const KEY_TYPE key = keys[i];
-    const uint32_t bucket_index = key / BUCKET_WIDTH;
+    const KEY_STRUCT key = keys[i];
+    const uint32_t bucket_index = key.word[0] / BUCKET_WIDTH;
     uint32_t index;
     assert(bucket_offsets[bucket_index] >= 0);
     index = bucket_offsets[bucket_index]++;
@@ -394,7 +394,7 @@ static inline void bucketize_local_keys(KEY_TYPE const * restrict const keys,
   sprintf(msg,"Rank %d: local bucketed keys: ", my_rank);
   for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i){
     if(i < PRINT_MAX)
-    sprintf(msg + strlen(msg),"%d ", local_bucketed_keys[i]);
+    sprintf(msg + strlen(msg),"%ld ", (long int) local_bucketed_keys[i].word[0]);
   }
   sprintf(msg + strlen(msg),"\n");
   printf("%s",msg);
@@ -407,9 +407,9 @@ static inline void bucketize_local_keys(KEY_TYPE const * restrict const keys,
 /*
  * Each PE sends the contents of its local buckets to the PE that owns that bucket.
  */
-static inline KEY_TYPE * exchange_keys(int const * restrict const offsets,
+static inline KEY_STRUCT * exchange_keys(int const * restrict const offsets,
                                        int const * restrict const local_bucket_sizes,
-                                       KEY_TYPE const * restrict const my_local_bucketed_keys)
+                                       KEY_STRUCT const * restrict const my_local_bucketed_keys)
 {
   timer_start(&timers[TIMER_ATA_KEYS]);
 
@@ -420,7 +420,7 @@ static inline KEY_TYPE * exchange_keys(int const * restrict const offsets,
   const long long int write_offset_into_self = shmem_longlong_fadd(&receive_offset, (long long int)local_bucket_sizes[my_rank], my_rank);
   memcpy(&my_bucket_keys[write_offset_into_self], 
          &my_local_bucketed_keys[offsets[my_rank]], 
-         local_bucket_sizes[my_rank]*sizeof(KEY_TYPE));
+         local_bucket_sizes[my_rank]*sizeof(KEY_STRUCT));
 
 
   for(uint64_t i = 0; i < NUM_PES; ++i){
@@ -448,7 +448,7 @@ static inline KEY_TYPE * exchange_keys(int const * restrict const offsets,
 
     shmem_putmem(&(my_bucket_keys[write_offset_into_target]), 
                   &(my_local_bucketed_keys[read_offset_from_self]), 
-                  my_send_size * sizeof(KEY_TYPE), 
+                  my_send_size * sizeof(KEY_STRUCT), 
                   target_pe);
 
     total_keys_sent += my_send_size;
@@ -468,7 +468,7 @@ static inline KEY_TYPE * exchange_keys(int const * restrict const offsets,
                         my_rank, receive_offset, total_keys_sent);
   for(long long int i = 0; i < receive_offset; ++i){
     if(i < PRINT_MAX)
-    sprintf(msg + strlen(msg),"%ld ", (long int)my_bucket_keys[i]);
+    sprintf(msg + strlen(msg),"%ld ", (long int)my_bucket_keys[i].word[0]);
   }
   sprintf(msg + strlen(msg),"\n");
   printf("%s",msg);
@@ -486,7 +486,7 @@ static inline KEY_TYPE * exchange_keys(int const * restrict const offsets,
  * minimum key value to allow indexing from 0.
  * bucket_keys: All keys in my bucket unsorted [my_rank * BUCKET_WIDTH, (my_rank+1)*BUCKET_WIDTH)
  */
-static inline void count_local_keys(KEY_TYPE const * restrict const bucket_keys, int * restrict const  local_key_counts)
+static inline void count_local_keys(KEY_STRUCT const * restrict const bucket_keys, int * restrict const  local_key_counts)
 {
 
   memset(local_key_counts, 0, BUCKET_WIDTH * sizeof(int));
@@ -497,9 +497,9 @@ static inline void count_local_keys(KEY_TYPE const * restrict const bucket_keys,
 
   // Count the occurences of each key in my bucket
   for(long long int i = 0; i < my_bucket_size; ++i){
-    const unsigned int key_index = bucket_keys[i] - my_min_key;
+    const unsigned int key_index = bucket_keys[i].word[0] - my_min_key;
 
-    assert(bucket_keys[i] >= my_min_key);
+    assert(bucket_keys[i].word[0] >= my_min_key);
     assert(key_index < BUCKET_WIDTH);
 
     local_key_counts[key_index]++;
@@ -528,7 +528,7 @@ static inline void count_local_keys(KEY_TYPE const * restrict const bucket_keys,
  * Ensures the final number of keys is equal to the initial.
  */
 static int verify_results(int const * restrict const my_local_key_counts,
-                           KEY_TYPE const * restrict const my_local_keys)
+                           KEY_STRUCT const * restrict const my_local_keys)
 {
 
   shmem_barrier_all();
@@ -542,10 +542,10 @@ static int verify_results(int const * restrict const my_local_key_counts,
 
   // Verify all keys are within bucket boundaries
   for(long long int i = 0; i < my_bucket_size; ++i){
-    const KEY_TYPE key = my_local_keys[i];
-    if((key < my_min_key) || (key > my_max_key)){
+    const KEY_STRUCT key = my_local_keys[i];
+    if((key.word[0] < my_min_key) || (key.word[0] > my_max_key)){
       printf("Rank %d Failed Verification!\n",my_rank);
-      printf("Key: %d is outside of bounds [%d, %d]\n", key, my_min_key, my_max_key);
+      printf("Key: %d is outside of bounds [%d, %d]\n", (long int) key.word[0], my_min_key, my_max_key);
       error = 1;
     }
   }

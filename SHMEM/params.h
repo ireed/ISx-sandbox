@@ -45,8 +45,26 @@ POSSIBILITY OF SUCH DAMAGE.
 // If you change this, you will have to change the SHMEM API calls used
 #ifdef UINT32_KEYS
 typedef uint32_t KEY_TYPE;
+typedef struct {
+  KEY_TYPE word[1];
+} uint32;
+typedef uint32 KEY_STRUCT;
+#define PCG_BOUNDEDRAND_R(rng,max_key)(\
+  {KEY_STRUCT k; \
+   k.word[0] = pcg32_boundedrand_r(rng,max_key); \
+   k; } )
+
+
 #else
 typedef int KEY_TYPE;
+typedef struct {
+  KEY_TYPE word[1];
+} int32;
+typedef int32 KEY_STRUCT;
+#define PCG_BOUNDEDRAND_R(rng,max_key)(\
+  {KEY_STRUCT k; \
+   k.word[0] = pcg32_boundedrand_r(rng,max_key); \
+   k; } )
 #endif
 
 // STRONG SCALING: Total number of keys are fixed and the number of keys per PE are reduced with increasing number of PEs
@@ -76,8 +94,15 @@ typedef int KEY_TYPE;
 // to keep the BUCKET_WIDTH constant per PE.
 #ifdef DEBUG
 #define DEFAULT_MAX_KEY (32uLL)
+
+#else
+
+#ifdef UINT32_KEYS
+#define DEFAULT_MAX_KEY (unsigned long long)((1uLL<<31uLL)-1uLL)
 #else
 #define DEFAULT_MAX_KEY (unsigned long long)(1uLL<<28uLL)
+#endif
+
 #endif
 
 // The number of iterations that an integer sort is performed
