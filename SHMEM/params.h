@@ -43,7 +43,31 @@ POSSIBILITY OF SUCH DAMAGE.
 
 // The data type used for the keys
 // If you change this, you will have to change the SHMEM API calls used
-#ifdef UINT32_KEYS
+#ifdef UINT128_KEYS
+typedef union {
+  struct {
+    uint64_t word[2];
+  } as64;
+} uint128;
+typedef uint128_t KEY_TYPE;
+#define PCG_BOUNDEDRAND_R(rng,max_key) \
+   ({ KEY_TYPE x = (KEY_TYPE)pcg32_boundedrand_r(rng,max_key); \
+    x = (x << 32) | (KEY_TYPE)pcg32_boundedrand_r(rng,max_key); \
+    x; }) 
+
+#elif defined(UINT64_KEYS)
+typedef uint64_t KEY_TYPE;
+typedef struct {
+  KEY_TYPE word[1];
+} uint64;
+typedef uint64 KEY_STRUCT;
+#define PCG_BOUNDEDRAND_R(rng,max_key) \
+   ({ KEY_STRUCT k; \
+	 k.word[0] = (KEY_TYPE)pcg32_boundedrand_r(rng,max_key); \
+    k.word[0] = (k.word[0] << 32) | (KEY_TYPE)pcg32_boundedrand_r(rng,max_key); \
+    k; }) 
+
+#elif defined(UINT32_KEYS)
 typedef uint32_t KEY_TYPE;
 typedef struct {
   KEY_TYPE word[1];
@@ -51,9 +75,8 @@ typedef struct {
 typedef uint32 KEY_STRUCT;
 #define PCG_BOUNDEDRAND_R(rng,max_key)(\
   {KEY_STRUCT k; \
-   k.word[0] = pcg32_boundedrand_r(rng,max_key); \
-   k; } )
-
+	k.word[0] = pcg32_boundedrand_r(rng,max_key); \
+	k; } )
 
 #else
 typedef int KEY_TYPE;
@@ -63,8 +86,8 @@ typedef struct {
 typedef int32 KEY_STRUCT;
 #define PCG_BOUNDEDRAND_R(rng,max_key)(\
   {KEY_STRUCT k; \
-   k.word[0] = pcg32_boundedrand_r(rng,max_key); \
-   k; } )
+	k.word[0] = pcg32_boundedrand_r(rng,max_key); \
+	k; } )
 #endif
 
 // STRONG SCALING: Total number of keys are fixed and the number of keys per PE are reduced with increasing number of PEs
@@ -93,22 +116,36 @@ typedef int32 KEY_STRUCT;
 // the range [0, DEFAULT_MAX_KEY]. WEAK_ISOBUCKET varies the MAX_KEY_VAL 
 // to keep the BUCKET_WIDTH constant per PE.
 #ifdef DEBUG
+//#ifdef UINT64_KEYS
+//#define DEFAULT_MAX_KEY (unsigned long long)((1uLL<<63uLL)-1uLL)
+//#define MAX_SUB_KEY (unsigned long long) ((1uLL<<31uLL)-1uLL)
+//#else
 #define DEFAULT_MAX_KEY (32uLL)
-
+#define MAX_SUB_KEY (32uLL) //Used when chaining smaller key types to form a larger one (ex: 128bit)
+//#endif
 #else
 
-#ifdef UINT32_KEYS
-#define DEFAULT_MAX_KEY (unsigned long long)((1uLL<<31uLL)-1uLL)
+#if defined(UINT128_KEYS)
+#define DEFAULT_MAX_KEY (unsigned long long)(1uLL<<64uLL)
+#define MAX_SUB_KEY (unsigned long long) ((1uLL<<31uLL)-1uLL)
+#elif defined(UINT64_KEYS)
+#define DEFAULT_MAX_KEY (unsigned long long)(1uLL<<64uLL)
+#define MAX_SUB_KEY (unsigned long long) ((1uLL<<31uLL)-1uLL)
+#elif defined(UINT32_KEYS)
+#define DEFAULT_MAX_KEY (unsigned long long)(1uLL<<32uLL)
+#define MAX_SUB_KEY (unsigned long long) (1uLL<<32uLL)
 #else
 #define DEFAULT_MAX_KEY (unsigned long long)(1uLL<<28uLL)
+#define MAX_SUB_KEY (1uLL<<28uLL)
 #endif
 
 #endif
 
+#define PIPELINE_DEPTH (1u)
 // The number of iterations that an integer sort is performed
 // (Burn in iterations are done first and are not timed)
-#define NUM_ITERATIONS (1u)
-#define BURN_IN (1u)
+#define NUM_ITERATIONS (1u * PIPELINE_DEPTH)
+#define BURN_IN (1u * PIPELINE_DEPTH)
 
 #define BARRIER_ATA
 

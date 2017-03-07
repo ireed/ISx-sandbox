@@ -40,12 +40,12 @@ POSSIBILITY OF SUCH DAMAGE.
 /*
  * Dynamically allocated variables.
  */
-KEY_STRUCT * restrict my_keys;
-int * restrict local_bucket_sizes;
-int * restrict local_bucket_offsets;
-KEY_STRUCT * restrict my_local_bucketed_keys;
-int * restrict my_local_key_counts;
-int * send_offsets;
+KEY_STRUCT ** restrict my_keys;
+int ** restrict local_bucket_sizes;
+int ** restrict local_bucket_offsets;
+KEY_STRUCT ** restrict my_local_bucketed_keys;
+int ** restrict my_local_key_counts;
+int ** send_offsets;
 
 /*
  * Ensures the command line parameters and values specified in params.h

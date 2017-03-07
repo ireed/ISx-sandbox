@@ -58,6 +58,7 @@ uint64_t NUM_KEYS_PER_PE; // Number of keys generated on each PE
 uint64_t NUM_BUCKETS; // The number of buckets in the bucket sort
 uint64_t BUCKET_WIDTH; // The size of each bucket
 uint64_t MAX_KEY_VAL; // The maximum possible generated key value
+uint64_t MAX_SUB_KEY_VAL; // The maximum possible generated key value for large key type (ex: 128bit)
 
 volatile int whose_turn;
 
@@ -81,25 +82,58 @@ int main(const int argc,  char ** argv)
   permute_array = (int *) malloc( shmem_n_pes() * sizeof(int) );
   #endif
 
-  #ifdef PERMUTE
-  int * permute_array;
-  permute_array = (int *) malloc( shmem_n_pes() * sizeof(int) );
-  #endif
-
   init_shmem_sync_array(pSync); 
 
   char * log_file = parse_params(argc, argv);
 
-  my_keys = malloc(NUM_KEYS_PER_PE * sizeof(KEY_STRUCT));
-  local_bucket_sizes = malloc(NUM_BUCKETS * sizeof(int));
-  send_offsets = malloc(NUM_BUCKETS * sizeof(int));
-  local_bucket_offsets = malloc(NUM_BUCKETS * sizeof(int));
-  my_local_bucketed_keys = malloc(NUM_KEYS_PER_PE * sizeof(KEY_STRUCT));
-  my_local_key_counts = malloc(BUCKET_WIDTH * sizeof(int));
+  my_keys = malloc(PIPELINE_DEPTH * sizeof(KEY_STRUCT*));
+  local_bucket_sizes = malloc(PIPELINE_DEPTH * sizeof(int*));
+  send_offsets = malloc(PIPELINE_DEPTH * sizeof(int*));
+  local_bucket_offsets = malloc(PIPELINE_DEPTH * sizeof(int*));
+  my_local_bucketed_keys = malloc(PIPELINE_DEPTH * sizeof(KEY_STRUCT*));
+  my_local_key_counts = malloc(PIPELINE_DEPTH * sizeof(int*));
 
-  int err = bucket_sort();
+  for(uint32_t i=0; i<PIPELINE_DEPTH; i++)
+  {
+    my_keys[i] = malloc(NUM_KEYS_PER_PE * sizeof(KEY_STRUCT));
+    local_bucket_sizes[i] = malloc(NUM_BUCKETS * sizeof(int));
+    send_offsets[i] = malloc(NUM_BUCKETS * sizeof(int));
+    local_bucket_offsets[i] = malloc(NUM_BUCKETS * sizeof(int));
+    my_local_bucketed_keys[i] = malloc(NUM_KEYS_PER_PE * sizeof(KEY_STRUCT));
+    my_local_key_counts[i] = malloc(BUCKET_WIDTH * sizeof(int));
+  }
+
+  int err = 0;
+
+  #ifdef PERMUTE
+    create_permutation_array();
+  #endif
+
+  // Burn in, warm-up
+  init_timers(NUM_ITERATIONS);
+  for(uint64_t i = 0; i < BURN_IN; ++i)
+    err = err | bucket_sort();
+
+  // Official, timed iterations
+  // Reset timers after burn in 
+  init_timers(NUM_ITERATIONS);
+  for(uint64_t i = 0; i < (NUM_ITERATIONS); ++i)
+    err = err | bucket_sort();
+
+  // Only the last iteration is verified
+  err = err | verify_results(my_local_key_counts[PIPELINE_DEPTH-1], my_bucket_keys);
 
   log_times(log_file);
+
+  for(uint64_t i = 0; i < PIPELINE_DEPTH; ++i)
+  {
+    free(my_local_bucketed_keys[i]);
+    free(my_keys[i]);
+    free(local_bucket_sizes[i]);
+    free(local_bucket_offsets[i]);
+    free(send_offsets[i]);
+    free(my_local_key_counts[i]);
+  }
 
   shmem_finalize();
   return err;
@@ -123,6 +157,7 @@ static char * parse_params(const int argc, char ** argv)
 
   NUM_PES = (uint64_t) shmem_n_pes();
   MAX_KEY_VAL = DEFAULT_MAX_KEY;
+  MAX_SUB_KEY_VAL = MAX_SUB_KEY;
   NUM_BUCKETS = NUM_PES;
   BUCKET_WIDTH = (uint64_t) ceil((double)MAX_KEY_VAL/NUM_BUCKETS);
   char * log_file = argv[2];
@@ -182,6 +217,7 @@ static char * parse_params(const int argc, char ** argv)
     printf("  Bucket Width: %" PRIu64 "\n", BUCKET_WIDTH);
     printf("  Number of Iterations: %u\n", NUM_ITERATIONS);
     printf("  Number of PEs: %" PRIu64 "\n", NUM_PES);
+    printf("  Pipeline Depth: %d\n", PIPELINE_DEPTH);
     printf("  %s Scaling!\n",scaling_msg);
     }
 
@@ -199,60 +235,40 @@ static int bucket_sort(void)
 {
   int err = 0;
 
-  init_timers(NUM_ITERATIONS);
 
-#ifdef PERMUTE
-  create_permutation_array();
-#endif
-
-  for(uint64_t i = 0; i < (NUM_ITERATIONS + BURN_IN); ++i)
+  for(uint64_t i = 0; i < PIPELINE_DEPTH; ++i)
   {
-
-    // Reset timers after burn in 
-    if(i == BURN_IN){ init_timers(NUM_ITERATIONS); } 
 
     shmem_barrier_all();
 
     timer_start(&timers[TIMER_TOTAL]);
 
-    make_input(my_keys);
+    make_input(my_keys[i]);
 
-    count_local_bucket_sizes(my_keys, local_bucket_sizes);
+    count_local_bucket_sizes(my_keys[i], local_bucket_sizes[i]);
 
-    compute_local_bucket_offsets(local_bucket_sizes,
-                                           &send_offsets, local_bucket_offsets);
+    compute_local_bucket_offsets(local_bucket_sizes[i], &send_offsets[i], 
+															local_bucket_offsets[i]);
 
-    bucketize_local_keys(my_keys, local_bucket_offsets, my_local_bucketed_keys);
+    bucketize_local_keys(my_keys[i], local_bucket_offsets[i], my_local_bucketed_keys[i]);
 
-    KEY_STRUCT * my_bucket_keys = exchange_keys(send_offsets, 
-                                              local_bucket_sizes,
-                                              my_local_bucketed_keys);
+    KEY_STRUCT * my_bucket_keys = exchange_keys(send_offsets[i], 
+                                              local_bucket_sizes[i],
+                                              my_local_bucketed_keys[i]);
 
     my_bucket_size = receive_offset;
 
-    count_local_keys(my_bucket_keys, my_local_key_counts);
+    count_local_keys(my_bucket_keys, my_local_key_counts[i]);
 
     shmem_barrier_all();
 
     timer_stop(&timers[TIMER_TOTAL]);
-
-    // Only the last iteration is verified
-    if(i == NUM_ITERATIONS) { 
-      err = verify_results(my_local_key_counts, my_bucket_keys);
-    }
 
     // Reset receive_offset used in exchange_keys
     receive_offset = 0;
 
     shmem_barrier_all();
   }
-
-  free(my_local_bucketed_keys);
-  free(my_keys);
-  free(local_bucket_sizes);
-  free(local_bucket_offsets);
-  free(send_offsets);
-  free(my_local_key_counts);
 
   return err;
 }
@@ -269,7 +285,7 @@ static void make_input(KEY_STRUCT * restrict const keys)
   pcg32_random_t rng = seed_my_rank();
 
   for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i) {
-    keys[i] = PCG_BOUNDEDRAND_R(&rng, MAX_KEY_VAL);
+    keys[i] = PCG_BOUNDEDRAND_R(&rng, MAX_SUB_KEY_VAL);
   }
 
   timer_stop(&timers[TIMER_INPUT]);
@@ -281,7 +297,7 @@ static void make_input(KEY_STRUCT * restrict const keys)
   sprintf(msg,"Rank %d: Initial Keys: ", my_rank);
   for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i){
     if(i < PRINT_MAX)
-    sprintf(msg + strlen(msg),"%ld ", (long int) keys[i].word[0]);
+    sprintf(msg + strlen(msg),"%ld ", (long int)keys[i].word[0]);
   }
   sprintf(msg + strlen(msg),"\n");
   printf("%s",msg);
@@ -394,7 +410,7 @@ static inline void bucketize_local_keys(KEY_STRUCT const * restrict const keys,
   sprintf(msg,"Rank %d: local bucketed keys: ", my_rank);
   for(uint64_t i = 0; i < NUM_KEYS_PER_PE; ++i){
     if(i < PRINT_MAX)
-    sprintf(msg + strlen(msg),"%ld ", (long int) local_bucketed_keys[i].word[0]);
+    sprintf(msg + strlen(msg),"%ld ", (long int)local_bucketed_keys[i].word[0]);
   }
   sprintf(msg + strlen(msg),"\n");
   printf("%s",msg);
@@ -537,15 +553,17 @@ static int verify_results(int const * restrict const my_local_key_counts,
 
   const int my_rank = shmem_my_pe();
 
-  const KEY_TYPE my_min_key = my_rank * BUCKET_WIDTH;
-  const KEY_TYPE my_max_key = (my_rank+1) * BUCKET_WIDTH - 1;
+  KEY_TYPE my_min_key;
+  my_min_key = my_rank * BUCKET_WIDTH;
+  KEY_TYPE my_max_key;
+  my_max_key = (my_rank+1) * BUCKET_WIDTH - 1;
 
   // Verify all keys are within bucket boundaries
   for(long long int i = 0; i < my_bucket_size; ++i){
     const KEY_STRUCT key = my_local_keys[i];
     if((key.word[0] < my_min_key) || (key.word[0] > my_max_key)){
       printf("Rank %d Failed Verification!\n",my_rank);
-      printf("Key: %d is outside of bounds [%d, %d]\n", (long int) key.word[0], my_min_key, my_max_key);
+      printf("Key: %ld is outside of bounds [%ld, %ld]\n", (long int)key.word[0], (long int)my_min_key, (long int)my_max_key);
       error = 1;
     }
   }
