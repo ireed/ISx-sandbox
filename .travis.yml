@@ -51,6 +51,8 @@ script:
     - export OSHRUN_LAUNCHER="mpiexec.hydra"
     - cd $ISX_SRC/SHMEM
     - make CC=oshcc
+    - export SMA_SYMMETRIC_SIZE='4G'
+    - export SHMEM_SYMMETRIC_SIZE='4G'
     - mpiexec.hydra -np 4 ./bin/isx.strong 134217728 output_strong
     - mpiexec.hydra -np 4 ./bin/isx.weak 33554432 output_weak
     - mpiexec.hydra -np 4 ./bin/isx.weak_iso 33554432 output_weak_iso
