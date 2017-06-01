@@ -1,8 +1,14 @@
 CC = cc
+#ireed: changed for shmem
+#CC = /home/ireed/joe-test-1/SOS-ofi-sockets/bin/oshcc
 LD = $(CC)
 DEBUGFLAGS = -g -p -O0 -DDEBUG
+#ireed: added -D for different keys
+#DEBUGFLAGS += -DUINT32_KEYS
 OPTFLAGS = -O3 -DNDEBUG -mavx
 CFLAGS += -Wall -Wextra -std=c99 #$(OPTFLAGS)
+#ireed: ADDED for shmem paths
+#CFLAGS += -I/home/ireed/tmp/sandia-shmem-ofi-sockets/include
 LDLIBS += -lrt -lm
 LDFLAGS += 
 ### 
